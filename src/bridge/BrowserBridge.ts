@@ -11,6 +11,7 @@ export interface StateSnap {
 }
 
 export interface RunParams {
+  preparationToken?: string;
   systemPrompt: string;
   convo: Array<{ role: string; content: string }>;
   workspaceRoot?: string | null;
@@ -61,11 +62,13 @@ export interface ToolEnvelope {
  */
 export interface BrowserBridge {
   connect(): Promise<void>;
+  prepare(tid: string, workspaceRoot: string): Promise<string>;
+  cancelPreparation(token: string): Promise<void>;
   close(): Promise<void>;
 
   /** Select provider + model + confirm-gating. NEVER touches the API key. */
-  config(opts: { provider?: string | null; model?: string | null; ensureConfirmOff?: boolean }): Promise<ConfigResult>;
-  navigate(url: string): Promise<{ ok: boolean; url?: string; tab?: string; err?: string }>;
+  config(opts: { provider?: string | null; model?: string | null; ensureConfirmOff?: boolean; preparationToken?: string }): Promise<ConfigResult>;
+  navigate(url: string, preparationToken?: string): Promise<{ ok: boolean; url?: string; tab?: string; err?: string }>;
 
   /** Create a real thread in the browser's ConversationStore (so the UI can list/show it). */
   newThread(title: string, workspace: string | null, mode: "assist" | "auto"): Promise<{ ok: boolean; id?: string; err?: string }>;

@@ -8,7 +8,8 @@ function frame(obj: unknown): Buffer {
 }
 
 /** Minimal mock Marionette server speaking the `<len>:<json>` protocol. */
-function startMock(): Promise<{ port: number; server: net.Server }> {
+function startMock(): Promise<{ port: number; server: net.Server; peak: () => number }> {
+  let active = 0, max = 0;
   const server = net.createServer((sock) => {
     sock.write(frame({ applicationType: "gecko", marionetteProtocol: 3 })); // hello
     let buf = Buffer.alloc(0);
@@ -25,12 +26,13 @@ function startMock(): Promise<{ port: number; server: net.Server }> {
         let result: unknown;
         if (name === "WebDriver:ExecuteScript") result = { value: { echo: params.args } };
         else result = { value: null };
-        sock.write(frame([1, mid, null, result]));
+        active++; max = Math.max(max, active);
+        setTimeout(() => { active--; sock.write(frame([1, mid, null, result])); }, 2);
       }
     });
   });
   return new Promise((res) =>
-    server.listen(0, "127.0.0.1", () => res({ port: (server.address() as net.AddressInfo).port, server })),
+    server.listen(0, "127.0.0.1", () => res({ port: (server.address() as net.AddressInfo).port, server, peak: () => max })),
   );
 }
 
@@ -43,6 +45,19 @@ describe("MarionetteWire framing", () => {
     expect(r).toEqual({ echo: ["a", "b"] });
     await w.close();
     server.close();
+  });
+
+  it("routes 30 pairs of concurrent callers with one command in flight", async () => {
+    const { port, server, peak } = await startMock();
+    const wire = new MarionetteWire();
+    try {
+      await wire.connect("127.0.0.1", port, 5000);
+      for (let i = 0; i < 30; i++) {
+        const [a, b] = await Promise.all([wire.execute("A", ["A", i]), wire.execute("B", ["B", i])]);
+        expect(a).toEqual({echo:["A", i]}); expect(b).toEqual({echo:["B", i]});
+      }
+      expect(peak()).toBe(1);
+    } finally { await wire.close(); server.close(); }
   });
 
   it("handles frames split across TCP chunks", async () => {

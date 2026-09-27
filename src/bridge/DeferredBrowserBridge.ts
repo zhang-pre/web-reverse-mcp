@@ -39,16 +39,19 @@ export class DeferredBrowserBridge implements BrowserBridge {
     return this.requireTarget().connect();
   }
 
+  prepare(tid: string, workspaceRoot: string): Promise<string> { return this.requireTarget().prepare(tid, workspaceRoot); }
+  cancelPreparation(token: string): Promise<void> { return this.requireTarget().cancelPreparation(token); }
+
   async close(): Promise<void> {
     if (this.target) await this.target.close();
   }
 
-  config(opts: { provider?: string | null; model?: string | null; ensureConfirmOff?: boolean }): Promise<ConfigResult> {
+  config(opts: { provider?: string | null; model?: string | null; ensureConfirmOff?: boolean; preparationToken?: string }): Promise<ConfigResult> {
     return this.requireTarget().config(opts);
   }
 
-  navigate(url: string): Promise<{ ok: boolean; url?: string; tab?: string; err?: string }> {
-    return this.requireTarget().navigate(url);
+  navigate(url: string, preparationToken?: string): Promise<{ ok: boolean; url?: string; tab?: string; err?: string }> {
+    return this.requireTarget().navigate(url, preparationToken);
   }
 
   newThread(

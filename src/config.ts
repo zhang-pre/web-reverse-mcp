@@ -64,7 +64,7 @@ export const config = {
   defaultModel: env.FRX_DEFAULT_MODEL || "",
 
   workspaceRoot: env.FRX_WORKSPACE_ROOT || defaultWorkspaceRoot(),
-  dataDir: env.FRX_DATA_DIR || join(FRX_DATA_HOME, "data"),
+  dataDir: env.FRX_DATA_DIR || join(FRX_DATA_HOME, "data", (env.FRX_ENV_ID || `${env.FRX_MARIONETTE_HOST || "127.0.0.1"}-${num(env.FRX_MARIONETTE_PORT, 2828)}`).replace(/[^a-zA-Z0-9._-]/g, "_")),
 
   /** Bridge transport. "marionette" is the proven default; "file" is a stub seam. */
   bridge: (env.FRX_BRIDGE || "marionette") as "marionette" | "file",

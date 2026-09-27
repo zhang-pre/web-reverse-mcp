@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,8 @@ class MockBridge implements BrowserBridge {
 
   async connect() {}
   async close() {}
+  async prepare(_tid: string, _workspaceRoot: string) { return "test-preparation"; }
+  async cancelPreparation(_token: string) {}
   async config() {
     return { provider: "deepseek", model: "deepseek-v4-flash", hasKey: this.hasKey, confirmTools: false };
   }
@@ -103,6 +105,13 @@ describe("Director loop", () => {
   it("rejects reverse-engineering tools through environment management", async () => {
     await expect(d.callEnvironmentTool({ name: "page_eval", args: {} }))
       .rejects.toThrow("Unsupported environment tool: page_eval");
+  });
+
+  it("rejects admission before config, navigation, append or run (30 races)", async () => {
+    const config=vi.spyOn(bridge,"config"), nav=vi.spyOn(bridge,"navigate"), append=vi.spyOn(bridge,"appendMessage");
+    vi.spyOn(bridge,"prepare").mockRejectedValue(new Error("environment occupied"));
+    for(let i=0;i<30;i++) await expect(d.start({task:"B",targetUrl:"https://example.invalid"})).rejects.toThrow(/occupied/);
+    expect(config).not.toHaveBeenCalled(); expect(nav).not.toHaveBeenCalled(); expect(append).not.toHaveBeenCalled(); expect(bridge.runs).toHaveLength(0);
   });
 
   it("start fires a run and confirms it actually started", async () => {

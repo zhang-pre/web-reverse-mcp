@@ -19,16 +19,6 @@ export interface StartupDiagnostic {
   error?: string;
 }
 
-function slug(s: string): string {
-  return (
-    s
-      .toLowerCase()
-      .replace(/[^a-z0-9一-龥]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 24) || "task"
-  );
-}
-
 function readFileSafe(p: string, maxChars: number): string | undefined {
   try {
     if (!existsSync(p)) return undefined;
@@ -147,68 +137,59 @@ export class Director {
     const assist = args.assist !== false;
     const model = args.model ?? this.cfg.defaultModel ?? "";
 
-    const cfgRes = await this.bridge.config({
-      provider: args.provider || null,
-      model: model || null,
-      ensureConfirmOff: args.ensureConfirmOff !== false,
-    });
-    if (!cfgRes.hasKey) {
-      throw new Error(
-        `当前 provider "${cfgRes.provider}" 没有配置 API key。` +
-          "请先在 Firefox Reverse 的 Agent 设置里给这个 provider 填好 key（MCP 不碰 key）。",
-      );
-    }
-
-    // Create a REAL thread in the browser's ConversationStore so the run is
-    // visible in the UI 会话列表 and can be opened/followed live. Fall back to a
-    // generated id if the store call fails (engine still runs by tid either way).
-    const fallbackTid = `frx-${slug(args.task)}-${Date.now().toString(36)}`;
-    const created = await this.bridge
-      .newThread(args.task.slice(0, 40), null, assist ? "assist" : "auto")
-      .catch(() => null);
-    const tid = created && created.ok && created.id ? created.id : fallbackTid;
-    this.log.event(tid, "new-thread", created);
-
+    const created = await this.bridge.newThread(args.task.slice(0, 40), null, assist ? "assist" : "auto");
+    if (!created.ok || !created.id) throw new Error(created.err || "Cannot create worker thread");
+    const tid = created.id;
     const workspaceRoot = args.workspaceRoot || join(this.cfg.workspaceRoot, tid);
     mkdirSync(workspaceRoot, { recursive: true });
-    // Bind the workspace to the store thread so the UI's 📁 bar shows the directory.
-    await this.bridge.setThreadWorkspace(tid, workspaceRoot).catch(() => {});
+    const preparationToken = await this.bridge.prepare(tid, workspaceRoot);
+    try {
+      const cfgRes = await this.bridge.config({
+        provider: args.provider || null, model: model || null,
+        ensureConfirmOff: args.ensureConfirmOff !== false, preparationToken,
+      });
+      if (!cfgRes.hasKey) throw new Error(`当前 provider "${cfgRes.provider}" 没有配置 API key，请在 Firefox 设置中配置。`);
+      const bound = await this.bridge.setThreadWorkspace(tid, workspaceRoot);
+      if (!bound.ok) throw new Error(bound.err || "Cannot bind workspace");
 
-    const s = this.sessions.create(tid, workspaceRoot, assist ? "assist" : "auto", model || null);
+      const s = this.sessions.create(tid, workspaceRoot, assist ? "assist" : "auto", model || null);
 
-    if (args.targetUrl) {
-      const nav = await this.bridge.navigate(args.targetUrl);
-      this.log.event(tid, "navigate", nav);
-    }
+      if (args.targetUrl) {
+        const nav = await this.bridge.navigate(args.targetUrl, preparationToken);
+        this.log.event(tid, "navigate", nav);
+        if (!nav.ok) throw new Error(nav.err || "Navigation failed");
+      }
 
-    const convo: Msg[] = [{ role: "user", content: args.task }];
-    this.sessions.setConvo(tid, convo);
-    // Mirror the task into the store thread so the UI shows the opening message.
-    await this.bridge.appendMessage(tid, "user", args.task).catch(() => {});
-    const sys = buildSystemPrompt(this.cfg.jsxPromptSrc, workspaceRoot, s.mode);
-    const r = await this.bridge.run(tid, {
-      systemPrompt: sys,
-      convo,
-      workspaceRoot,
-      assist,
-      maxRounds: args.maxRounds || 80,
-    });
-    this.log.event(tid, "run", r);
-    const started = r.ok ? await this.confirmStarted(tid) : false;
+      const convo: Msg[] = [{ role: "user", content: args.task }];
+      this.sessions.setConvo(tid, convo);
+      // Mirror the task into the store thread so the UI shows the opening message.
+      await this.bridge.appendMessage(tid, "user", args.task).catch(() => {});
+      const sys = buildSystemPrompt(this.cfg.jsxPromptSrc, workspaceRoot, s.mode);
+      const r = await this.bridge.run(tid, {
+        preparationToken,
+        systemPrompt: sys,
+        convo,
+        workspaceRoot,
+        assist,
+        maxRounds: args.maxRounds || 80,
+      });
+      this.log.event(tid, "run", r);
+      const started = r.ok ? await this.confirmStarted(tid) : false;
 
-    return {
-      tid,
-      workspaceRoot,
-      provider: cfgRes.provider,
-      model: cfgRes.model,
-      hasKey: cfgRes.hasKey,
-      mode: s.mode,
-      started,
-      runResult: r,
-      hint: started
-        ? "worker 已开始磨。GPT/CLI 委派模式推荐下一步:先 agent_poll({tid}) 短轮询,或用 agent_wait_for_stop({tid}) 长等待; settled 后用 agent_read_brief/agent_read 读取结论。"
-        : "run() 未确认启动（可能上一轮还在跑或时序竞争）——用 agent_state 查，必要时 agent_stop 后重试。",
-    };
+      return {
+        tid,
+        workspaceRoot,
+        provider: cfgRes.provider,
+        model: cfgRes.model,
+        hasKey: cfgRes.hasKey,
+        mode: s.mode,
+        started,
+        runResult: r,
+        hint: started
+          ? "worker 已开始磨。GPT/CLI 委派模式推荐下一步:先 agent_poll({tid}) 短轮询,或用 agent_wait_for_stop({tid}) 长等待; settled 后用 agent_read_brief/agent_read 读取结论。"
+          : "run() 未确认启动（可能上一轮还在跑或时序竞争）——用 agent_state 查，必要时 agent_stop 后重试。",
+      };
+    } finally { await this.bridge.cancelPreparation(preparationToken); }
   }
 
   async waitForStop(args: { tid: string; timeoutSec?: number; intervalSec?: number }): Promise<WaitResult> {
@@ -320,50 +301,54 @@ export class Director {
   async send(args: { tid: string; guidance: string; maxRounds?: number; assist?: boolean }) {
     const s = this.sessions.require(args.tid);
 
-    const cur = await this.bridge.getState(args.tid);
-    if (cur && cur.running) {
-      throw new Error("当前还有一轮在跑（refuse）。先 agent_wait_for_stop 等它停，或 agent_stop 砍掉，再发 guidance。");
-    }
+    const preparationToken = await this.bridge.prepare(args.tid, s.workspaceRoot);
+    try {
+      const cur = await this.bridge.getState(args.tid);
+      if (cur && cur.running) {
+        throw new Error("当前还有一轮在跑（refuse）。先 agent_wait_for_stop 等它停，或 agent_stop 砍掉，再发 guidance。");
+      }
 
-    // Carry the FULL final assistant conclusion (untruncated — FIX #convo).
-    const full = await this.bridge.getContent(args.tid).catch(() => ({ content: "", running: false, settled: false }));
-    let asst = full.content || "";
-    const convo = s.convo.slice();
-    if (!asst && convo.length && convo[convo.length - 1]!.role === "user") {
-      asst = "（上一轮未产出最终文本/已重启浏览器升级工具，进展见工作目录 ledger.md / progress.md）";
-    }
-    const last = convo[convo.length - 1];
-    if (asst && !(last && last.role === "assistant" && last.content === asst)) {
-      convo.push({ role: "assistant", content: asst });
-    }
-    convo.push({ role: "user", content: args.guidance });
-    this.sessions.setConvo(args.tid, convo);
-    // Mirror the direction into the store thread so the UI shows it live.
-    await this.bridge.appendMessage(args.tid, "user", args.guidance).catch(() => {});
+      // Carry the FULL final assistant conclusion (untruncated — FIX #convo).
+      const full = await this.bridge.getContent(args.tid).catch(() => ({ content: "", running: false, settled: false }));
+      let asst = full.content || "";
+      const convo = s.convo.slice();
+      if (!asst && convo.length && convo[convo.length - 1]!.role === "user") {
+        asst = "（上一轮未产出最终文本/已重启浏览器升级工具，进展见工作目录 ledger.md / progress.md）";
+      }
+      const last = convo[convo.length - 1];
+      if (asst && !(last && last.role === "assistant" && last.content === asst)) {
+        convo.push({ role: "assistant", content: asst });
+      }
+      convo.push({ role: "user", content: args.guidance });
+      this.sessions.setConvo(args.tid, convo);
+      // Mirror the direction into the store thread so the UI shows it live.
+      await this.bridge.appendMessage(args.tid, "user", args.guidance).catch(() => {});
 
-    const assist = args.assist ?? s.mode === "assist";
-    const seq = convo.filter((m) => m.role === "user").length;
-    this.log.guidance(args.tid, seq, args.guidance);
+      const assist = args.assist ?? s.mode === "assist";
+      const seq = convo.filter((m) => m.role === "user").length;
+      this.log.guidance(args.tid, seq, args.guidance);
 
-    const sys = buildSystemPrompt(this.cfg.jsxPromptSrc, s.workspaceRoot, assist ? "assist" : "auto");
-    const r = await this.bridge.run(args.tid, {
-      systemPrompt: sys,
-      convo,
-      workspaceRoot: s.workspaceRoot,
-      assist,
-      maxRounds: args.maxRounds || 80,
-    });
-    this.log.event(args.tid, "advance", r);
-    const started = r.ok ? await this.confirmStarted(args.tid) : false;
+      const sys = buildSystemPrompt(this.cfg.jsxPromptSrc, s.workspaceRoot, assist ? "assist" : "auto");
+      const r = await this.bridge.run(args.tid, {
+        preparationToken,
+        systemPrompt: sys,
+        convo,
+        workspaceRoot: s.workspaceRoot,
+        assist,
+        maxRounds: args.maxRounds || 80,
+      });
+      this.log.event(args.tid, "advance", r);
+      const started = r.ok ? await this.confirmStarted(args.tid) : false;
 
-    return {
-      tid: args.tid,
-      started,
-      convoLen: convo.length,
-      assistantCharsCarried: asst.length,
-      checkpointWarning: (cur?.checkpointSeq ?? 0) > 0,
-      runResult: r,
-    };
+      return {
+        tid: args.tid,
+        started,
+        convoLen: convo.length,
+        assistantCharsCarried: asst.length,
+        checkpointWarning: (cur?.checkpointSeq ?? 0) > 0,
+        runResult: r,
+      };
+    } finally { await this.bridge.cancelPreparation(preparationToken); }
   }
 
   async setMode(args: { tid: string; mode: "assist" | "auto" }) {

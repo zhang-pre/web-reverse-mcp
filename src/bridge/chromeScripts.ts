@@ -27,7 +27,9 @@ const MOD = (name: keyof typeof MODULE_PATHS) =>
  * once in the browser. Returns hasKey as a boolean only (never the key itself).
  */
 export const JS_CONFIG = `
-const [provider, model, ensureConfirmOff] = arguments;
+const [provider, model, ensureConfirmOff, token] = arguments;
+const { agentSession } = ChromeUtils.importESModule(${JSON.stringify(MOD("AgentSession"))});
+if (provider || model || ensureConfirmOff) agentSession.assertPreparation(token);
 const { configStore } = ChromeUtils.importESModule(${JSON.stringify(MOD("ConfigStore"))});
 if (provider) configStore.setActiveProvider(provider);
 const active = configStore.getActiveProvider();
@@ -39,25 +41,38 @@ return { provider: active,
          confirmTools: configStore.getConfirmTools() };
 `;
 
-/** Navigate the most-recent browser window's current tab to a URL. */
+/** Reserve this environment before any configuration or navigation side effects. */
+export const JS_PREPARE = `
+const a = arguments; const cb = a[a.length - 1];
+const { agentSession } = ChromeUtils.importESModule(${JSON.stringify(MOD("AgentSession"))});
+agentSession.prepare(a[0], { workspaceRoot: a[1] })
+  .then(token => cb({ ok:true, token })).catch(e => cb({ ok:false, err:String(e.message || e) }));
+`;
+export const JS_CANCEL_PREPARATION = `
+const { agentSession } = ChromeUtils.importESModule(${JSON.stringify(MOD("AgentSession"))});
+agentSession.cancelPreparation(arguments[0]);
+`;
+/** Navigate the tab bound by the preparation token. */
 export const JS_NAV = `
-const [url] = arguments;
-const win = Services.wm.getMostRecentWindow("navigator:browser");
-if (!win) return { ok:false, err:"no browser window" };
-win.focus();
-win.openTrustedLinkIn(url, "current");
-const b = win.gBrowser && win.gBrowser.selectedBrowser;
-return { ok:true, url, tab: b && b.currentURI && b.currentURI.spec };
+const a = arguments; const cb = a[a.length - 1];
+const { agentSession } = ChromeUtils.importESModule(${JSON.stringify(MOD("AgentSession"))});
+const { getBackends } = ChromeUtils.importESModule(${JSON.stringify(MOD("Backends"))});
+Promise.resolve().then(() => getBackends().page.navigate({url:a[0]}, agentSession.preparationContext(a[1])))
+  .then(value => cb(value)).catch(e => cb({ok:false, err:String(e.message || e)}));
 `;
 
-/** Fire ONE agentSession.run (fire-and-forget). Refuses if a turn is in flight. */
+/** Admission is acknowledged before returning started; execution remains asynchronous. */
 export const JS_RUN = `
-const [tid, sys, convo, ws, assist, maxRounds] = arguments;
+const a = arguments; const cb = a[a.length - 1];
+const [tid, sys, convo, ws, assist, maxRounds, token] = a;
 const { agentSession } = ChromeUtils.importESModule(${JSON.stringify(MOD("AgentSession"))});
-if (agentSession.isRunning(tid)) return { ok:false, err:"already running", running:true };
-agentSession.run(tid, { systemPrompt: sys, convo: convo, confirmMode:false,
-  assist: !!assist, maxRounds: maxRounds||80, maxPerTool:40, workspaceRoot: ws||null, win:null });
-return { ok:true, started:true, tid };
+Promise.resolve().then(async () => {
+  const preparationToken = token || await agentSession.prepare(tid, {workspaceRoot:ws});
+  agentSession.assertPreparation(preparationToken);
+  const result = await agentSession.start(tid, {systemPrompt:sys, convo, confirmMode:false,
+    assist:!!assist, maxRounds:maxRounds||80, maxPerTool:40, workspaceRoot:ws, preparationToken});
+  cb(result);
+}).catch(e => cb({ok:false, err:String(e.message || e)}));
 `;
 
 /** Slim snapshot for polling/streaming (content tail truncated for cheapness). */
@@ -108,6 +123,11 @@ return getRunLog();
 export const JS_NEWTHREAD = `
 const a = arguments; const cb = a[a.length - 1];
 const [title, workspace, mode] = a;
+const { agentSession } = ChromeUtils.importESModule(${JSON.stringify(MOD("AgentSession"))});
+const worker = agentSession.workerState();
+if (worker?.threadId || worker?.phase !== "idle" || worker?.restartRequired) {
+  cb({ok:false, err:"此环境已绑定会话或正在准备任务，请使用另一个独立 Firefox 环境"}); return;
+}
 const { conversationStore } = ChromeUtils.importESModule(${JSON.stringify(MOD("ConversationStore"))});
 Promise.resolve(conversationStore.createThread(title || "MCP 任务", workspace || null, mode || "assist"))
   .then(function(t){ cb({ ok:true, id: t && t.id }); })

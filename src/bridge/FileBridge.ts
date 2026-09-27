@@ -30,6 +30,9 @@ export class FileBridge implements BrowserBridge {
     );
   }
 
+  async prepare(_tid: string, _workspaceRoot: string): Promise<string> { throw new Error("FileBridge worker admission is not implemented"); }
+  async cancelPreparation(_token: string): Promise<void> {}
+
   async close(): Promise<void> {}
 
   /** Atomic write (temp + rename) so the poller never reads a half-written file. */
@@ -58,10 +61,10 @@ export class FileBridge implements BrowserBridge {
     }
   }
 
-  async config(opts: { provider?: string | null; model?: string | null; ensureConfirmOff?: boolean }): Promise<ConfigResult> {
+  async config(opts: { provider?: string | null; model?: string | null; ensureConfirmOff?: boolean; preparationToken?: string }): Promise<ConfigResult> {
     return (await this.send("config", opts)) as ConfigResult;
   }
-  async navigate(url: string) {
+  async navigate(url: string, preparationToken?: string) {
     return (await this.send("navigate", { url })) as { ok: boolean; url?: string; tab?: string; err?: string };
   }
   async newThread(title: string, workspace: string | null, mode: "assist" | "auto") {

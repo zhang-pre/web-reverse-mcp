@@ -4,6 +4,8 @@ import { MarionetteWire, MarionetteError } from "./marionetteWire.js";
 import { MarionetteLock } from "./marionetteLock.js";
 import {
   JS_CONFIG,
+  JS_PREPARE,
+  JS_CANCEL_PREPARATION,
   JS_NAV,
   JS_RUN,
   JS_STATE,
@@ -31,8 +33,7 @@ import type {
  *  lifetime and hands off cleanly on exit. */
 const LOCK_WAIT_MS = 4000;
 
-/** A dropped/never-established connection (reconnect+retry) vs. a real Marionette
- *  protocol error (surface as-is — retrying it would just fail again). */
+/** Transport loss makes the result of a browser mutation uncertain. */
 function isConnLost(e: unknown): boolean {
   if (e instanceof MarionetteError) return false;
   const m = (e as Error)?.message || "";
@@ -49,9 +50,11 @@ function isConnLost(e: unknown): boolean {
  * Robustness (2026-06-11): connection is LAZY (only opened on first real use, so
  * idle sessions never contend), arbitrated by a cross-process {@link MarionetteLock}
  * (one owner at a time — no more slot-stealing between sessions), and self-healing
- * (a dropped socket is reconnected + retried ONCE per call, keeping ownership).
+ * (a dropped socket requires restart; mutations are never automatically replayed).
  */
 export class MarionetteBridge implements BrowserBridge {
+  private uncertain = false;
+  private closing = false;
   private wire: MarionetteWire | null = null;
   private lock: MarionetteLock;
   private connecting: Promise<void> | null = null;
@@ -72,6 +75,7 @@ export class MarionetteBridge implements BrowserBridge {
   /** Ensure a live connection (acquiring the lock if we don't own it). Single-flight
    *  so concurrent callers share one in-progress connect. */
   async connect(): Promise<void> {
+    if (this.closing || this.uncertain) throw new Error("Bridge closed or uncertain; restart Firefox and MCP");
     if (this.isLive()) return;
     if (this.connecting) return this.connecting;
     this.connecting = this.doConnect().finally(() => {
@@ -87,7 +91,7 @@ export class MarionetteBridge implements BrowserBridge {
         const h = this.lock.currentHolder();
         throw new Error(
           `另一个 frx-director 会话正持有浏览器 Marionette 连接（PID ${h?.pid ?? "?"}）。` +
-            "Marionette 是单客户端:请关掉那个会话、或等它结束后重试(它退出时会自动让出锁)。",
+            "Marionette 是单客户端。正常关闭持有者会释放锁；若持有者已崩溃，请停止所有 MCP 客户端后删除锁文件：" + this.lock.filePath,
         );
       }
     }
@@ -104,6 +108,8 @@ export class MarionetteBridge implements BrowserBridge {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
+    await this.connecting?.catch(() => {});
     const w = this.wire;
     this.wire = null;
     if (w) {
@@ -116,15 +122,9 @@ export class MarionetteBridge implements BrowserBridge {
     this.lock.release();
   }
 
-  /**
-   * Every browser op funnels through here. Two explicit phases:
-   *  1. connect lazily (via the lock) then run; a CONNECT failure (degraded lock,
-   *     Firefox down) propagates as-is — retrying connect would just fail again.
-   *  2. only if the op itself drops the socket mid-flight (isConnLost, not a real
-   *     MarionetteError) do we discard the dead wire, reconnect ONCE, and retry the
-   *     op ONCE. A second failure propagates. Each success renews the lock lease.
-   */
+  /** A transport failure is terminal for this bridge: a mutation may already have executed. */
   private async exec<T>(fn: (w: MarionetteWire) => Promise<T>): Promise<T> {
+    if (this.uncertain) throw new Error("Previous operation outcome is unknown; restart Firefox and MCP before further operations");
     await this.connect();
     const w1 = this.wire;
     if (!w1) throw new Error("marionette not connected");
@@ -134,24 +134,30 @@ export class MarionetteBridge implements BrowserBridge {
       return r;
     } catch (e) {
       if (!isConnLost(e)) throw e; // real protocol/app error — surface it
+      this.uncertain = true;
       this.wire = null; // dead wire already tore down its own socket in fail()
-      await this.connect();
-      const w2 = this.wire;
-      if (!w2) throw new Error("marionette not connected");
-      const r = await fn(w2);
-      this.lock.renew();
-      return r;
+      // The previous operation may already have changed the browser. Never replay it.
+      throw new Error("Marionette connection lost; operation outcome is unknown. Restart the environment before retrying.", { cause: e });
     }
   }
 
-  async config(opts: { provider?: string | null; model?: string | null; ensureConfirmOff?: boolean }): Promise<ConfigResult> {
+  async prepare(tid: string, workspaceRoot: string): Promise<string> {
+    const r = await this.exec(w => w.executeAsync(JS_PREPARE, [tid, workspaceRoot])) as {ok:boolean; token?:string; err?:string};
+    if (!r.ok || !r.token) throw new Error(r.err || "Worker admission failed");
+    return r.token;
+  }
+  async cancelPreparation(token: string): Promise<void> {
+    await this.exec(w => w.execute(JS_CANCEL_PREPARATION, [token]));
+  }
+
+  async config(opts: { provider?: string | null; model?: string | null; ensureConfirmOff?: boolean; preparationToken?: string }): Promise<ConfigResult> {
     return (await this.exec((w) =>
-      w.execute(JS_CONFIG, [opts.provider || null, opts.model || null, opts.ensureConfirmOff !== false]),
+      w.execute(JS_CONFIG, [opts.provider || null, opts.model || null, opts.ensureConfirmOff !== false, opts.preparationToken || null]),
     )) as ConfigResult;
   }
 
-  async navigate(url: string) {
-    return (await this.exec((w) => w.execute(JS_NAV, [url]))) as {
+  async navigate(url: string, preparationToken?: string) {
+    return (await this.exec((w) => w.executeAsync(JS_NAV, [url, preparationToken || null]))) as {
       ok: boolean;
       url?: string;
       tab?: string;
@@ -177,7 +183,7 @@ export class MarionetteBridge implements BrowserBridge {
 
   async run(tid: string, p: RunParams) {
     return (await this.exec((w) =>
-      w.execute(JS_RUN, [tid, p.systemPrompt, p.convo, p.workspaceRoot || null, !!p.assist, p.maxRounds || 80]),
+      w.executeAsync(JS_RUN, [tid, p.systemPrompt, p.convo, p.workspaceRoot || null, !!p.assist, p.maxRounds || 80, p.preparationToken || null]),
     )) as { ok: boolean; started?: boolean; err?: string; running?: boolean };
   }
 
@@ -219,8 +225,7 @@ export class MarionetteBridge implements BrowserBridge {
     opts: { workspaceRoot?: string | null } = {},
   ): Promise<ToolEnvelope> {
     // Environment operations can run long → generous scriptTimeout.
-    // The exec() funnel keeps the lock and
-    // reconnects once on a mid-op socket drop.
+    // The exec() funnel retains ownership and never replays an uncertain mutation.
     return (await this.exec((w) =>
       w.executeAsync(JS_CALLTOOL, [name, args || {}, opts.workspaceRoot ?? null], 300_000),
     )) as ToolEnvelope;

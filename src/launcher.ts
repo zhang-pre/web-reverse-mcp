@@ -241,7 +241,7 @@ export function buildLaunchCommand(opts: {
       // open's inherited environment can reinterpret UTF-8 bytes as Latin-1.
       // Explicit --env arguments preserve Unicode paths and environment labels.
       // Keep JSON payloads (which may contain secrets) out of argv entirely.
-      const pathKeys = new Set(["HOME", "PATH", "TMPDIR", "MOZ_FRX_FINGERPRINT_CONFIG", "MOZ_FRX_PROXY_CONFIG", "MOZ_FRX_ENVS_ROOT", "MOZ_FRX_TRACE_DIR", "MOZ_FRX_CONTROL_DIR", "MOZ_FRX_ENV_NAME", "MOZ_FRX_PROCESS_LABEL", "FRX_ENV_NAME", "FRX_ENVS_ROOT", "MOZ_WEBAPI_TRACE_FILE", "MOZ_WEBAPI_TRACE_CTL", "MOZ_JSVMP_TRACE_FILE"]);
+      const pathKeys = new Set(["HOME", "PATH", "TMPDIR", "MOZ_FRX_FINGERPRINT_CONFIG", "MOZ_FRX_PROXY_CONFIG", "MOZ_FRX_ENVS_ROOT", "MOZ_FRX_TRACE_DIR", "MOZ_FRX_CONTROL_DIR", "MOZ_FRX_ENV_NAME", "MOZ_FRX_PROCESS_LABEL", "FRX_ENV_NAME", "FRX_ENVS_ROOT", "MOZ_WEBAPI_TRACE_FILE", "MOZ_WEBAPI_TRACE_CTL", "MOZ_JSVMP_TRACE_FILE", "MOZ_JSVMP_TRACE_CTL", "MOZ_JSVMP_DUMP_CTL", "MOZ_JSVMP_TRACE_CLEAR"]);
       const unicodeEnvironment = Object.entries(opts.environment || {}).flatMap(([key, value]) => pathKeys.has(key) && typeof value === "string" && /[^\x00-\x7f]/.test(value) ? ["--env", `${key}=${value}`] : []);
       const args = ["-n", "-a", appPath, ...unicodeEnvironment, "--args", ...opts.args];
       return {
@@ -492,6 +492,9 @@ export async function resolveBrowserLaunch(opts: {
       MOZ_WEBAPI_TRACE_FILE: join(traceDir, "webapi.ndjson"),
       MOZ_WEBAPI_TRACE_CTL: join(controlDir, "webapi.ctl"),
       MOZ_JSVMP_TRACE_FILE: join(traceDir, "jsvmp.ndjson"),
+      MOZ_JSVMP_TRACE_CTL: join(controlDir, "jsvmp.ctl"),
+      MOZ_JSVMP_DUMP_CTL: join(controlDir, "jsvmp.dump"),
+      MOZ_JSVMP_TRACE_CLEAR: join(controlDir, "jsvmp.clear"),
       MOZ_FRX_HIDE_REMOTE_CONTROL_CUE: "1",
       FRX_ENV_ID: opts.envId,
       FRX_ENV_NAME: envName,

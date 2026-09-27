@@ -20,6 +20,7 @@ export class MarionetteWire {
   private waiters: Array<{ resolve: (f: unknown) => void; reject: (e: Error) => void }> = [];
   private mid = 0;
   private closed = false;
+  private commands: Promise<unknown> = Promise.resolve();
 
   async connect(host: string, port: number, timeoutMs = 180_000): Promise<void> {
     await new Promise<void>((resolve, reject) => {
@@ -106,7 +107,13 @@ export class MarionetteWire {
     });
   }
 
-  async command(name: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  command(name: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    const operation = this.commands.catch(() => {}).then(() => this.sendCommand(name, params));
+    this.commands = operation;
+    return operation;
+  }
+
+  private async sendCommand(name: string, params: Record<string, unknown> = {}): Promise<unknown> {
     if (!this.sock || this.closed) throw new Error("marionette not connected");
     const id = ++this.mid;
     const payload = Buffer.from(JSON.stringify([0, id, name, params]), "utf8");
