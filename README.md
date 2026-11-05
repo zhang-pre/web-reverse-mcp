@@ -1,12 +1,12 @@
 <div align="center">
 
-# browser-agent-mcp
+# web-reverse-mcp
 
 **高能力模型负责研判，低成本模型负责浏览器内执行**
 
 </div>
 
-`browser-agent-mcp` 是连接 Claude、GPT 等上层模型与 [browser-agent](https://github.com/zhang-pre/browser-agent) 内置 Agent 的 MCP 服务。它把任务拆成两个角色：director 制定路线并审核阶段成果，worker 在浏览器中完成抓包、签名追踪、环境补全和脚本验证。
+`web-reverse-mcp` 是连接 Claude、GPT 等上层模型与 [web-reverse](https://github.com/zhang-pre/web-reverse) 内置 Agent 的 MCP 服务。它把任务拆成两个角色：director 制定路线并审核阶段成果，worker 在浏览器中完成抓包、签名追踪、环境补全和脚本验证。
 
 这种分工把强模型的推理成本集中在关键决策处。默认的 `assist` 模式会在阶段门暂停并提交可审查结果，方便及时纠偏；路线明确后也可切换至 `auto`，让 worker 连续处理剩余工作。
 
@@ -21,7 +21,7 @@
 一次任务按“下达目标—执行—审阅—校正”循环推进：
 
 1. director 通过 `agent_start` 创建任务，使用 `agent_send` 补充或调整方向。
-2. browser-agent 中配置的 worker 调用浏览器工具落实操作。
+2. web-reverse 中配置的 worker 调用浏览器工具落实操作。
 3. director 借助 `agent_poll`、`agent_read_brief` 或 `agent_read` 检查产出。
 4. 重复审阅和纠偏，直到获得能够脱离浏览器运行的成果。
 
@@ -30,7 +30,7 @@
 ## 执行流程
 
 ```text
- director（Claude / GPT）                         browser-agent
+ director（Claude / GPT）                         web-reverse
  ┌────────────────────────┐    MCP / stdio    ┌──────────────────────────┐
  │ agent_start：明确目标    │ ────────────────▶ │ 低成本 worker 调用 68 项工具 │
  │ agent_poll：查询进度     │                  │ 执行并在阶段门生成结论        │
@@ -48,7 +48,7 @@ director 每轮通常只需阅读摘要并给出一条明确指令，因此 toke
 director（Claude / GPT）
         │ MCP over stdio
         ▼
-browser-agent-mcp ── 22 项工具 ── BrowserBridge
+web-reverse-mcp ── 22 项工具 ── BrowserBridge
         │                         ├─ Marionette（默认）
         │                         └─ FileBridge（备用）
         ├─ agent_start / send / read ...
@@ -62,7 +62,7 @@ browser-agent-mcp ── 22 项工具 ── BrowserBridge
               ChromeUtils.importESModule(AgentSession.sys.mjs)
                                   │ run / getState / stop
                                   ▼
-                 browser-agent 父进程中的 agentSession 单例
+                 web-reverse 父进程中的 agentSession 单例
                                   │
                                   ▼
              内置 worker Agent + ledger.md / progress.md
@@ -74,11 +74,11 @@ browser-agent-mcp ── 22 项工具 ── BrowserBridge
 
 ### 环境要求
 
-1. 安装 [browser-agent](https://github.com/zhang-pre/browser-agent)，并在 Agent 设置中为 worker 配置模型 API Key，例如 DeepSeek、通义千问或 GLM。该 Key 只在浏览器侧使用，本服务不会读取。
-2. 使用 Marionette 和系统访问权限启动浏览器，以便在 chrome context 中执行特权 JavaScript。macOS 可通过 LaunchServices 启动：
+1. 安装 [web-reverse](https://github.com/zhang-pre/web-reverse)，并在 Agent 设置中为 worker 配置模型 API Key，例如 DeepSeek、通义千问或 GLM。该 Key 只在浏览器侧使用，本服务不会读取。
+2. 使用 Marionette 和系统访问权限启动浏览器，以便在 chrome context 中执行特权 JavaScript。macOS 可通过 LaunchServices 启动，应用路径以实际安装位置为准，升级安装可能保留旧目录名：
 
    ```bash
-   open -n -a "/Applications/Browser Agent.app" --args \
+   open -n -a "<Web Reverse 的实际 .app 路径>" --args \
        -marionette -remote-allow-system-access -no-remote \
        -profile "<你的 profile>"
    ```
@@ -89,9 +89,9 @@ browser-agent-mcp ── 22 项工具 ── BrowserBridge
 
 在 Cursor、Claude Code、Codex 等工具中发送：
 
-> 请安装并配置 MCP 服务 **browser-agent-mcp**。
+> 请安装并配置 MCP 服务 **web-reverse-mcp**。
 >
-> 仓库地址：https://github.com/zhang-pre/browser-agent-mcp
+> 仓库地址：https://github.com/zhang-pre/web-reverse-mcp
 
 编码助手可据此完成克隆仓库、安装依赖、构建项目以及写入 MCP 客户端配置。
 
@@ -100,7 +100,7 @@ browser-agent-mcp ── 22 项工具 ── BrowserBridge
 将下面的提示词作为首条消息发送给 director，它会依次检查环境、收集目标、委派任务并验收结果。
 
 ```text
-你通过名为 browser-agent-mcp 的 MCP 服务，协调 browser-agent 内置的逆向 Agent。
+你通过名为 web-reverse-mcp 的 MCP 服务，协调 web-reverse 内置的逆向 Agent。
 
 你是 Web 爬虫与签名分析专家，负责判断路线和验收成果，不直接操作浏览器。浏览器中的低成本 worker 承担抓包、追踪、环境补全及脚本验证。每轮只阅读必要结论并给出明确指导，以减少强模型的 token 消耗。
 
@@ -151,7 +151,7 @@ browser-agent-mcp ── 22 项工具 ── BrowserBridge
 | 工具 | 用途 |
 |---|---|
 | `frx_status` | 任务开始前执行健康检查，返回 Marionette 连接状态、worker provider/model 及 Key 配置情况；未就绪时附带处理建议。 |
-| `agent_tools` | 获取 browser-agent 实际注册的 68 项能力，包括 `signer_trace`、`jsvmp_trace`、`closure_read`、`webapi_trace`、`whitebox_diff`、`wasm_probe` 等引擎级分析工具，以及页面、文件、Skills、记忆、指纹环境和扩展管理能力。该工具只返回名称、说明、参数与确认要求，实际操作由 worker 执行。 |
+| `agent_tools` | 获取 web-reverse 实际注册的 68 项能力，包括 `signer_trace`、`jsvmp_trace`、`closure_read`、`webapi_trace`、`whitebox_diff`、`wasm_probe` 等引擎级分析工具，以及页面、文件、Skills、记忆、指纹环境和扩展管理能力。该工具只返回名称、说明、参数与确认要求，实际操作由 worker 执行。 |
 
 ### 会话控制
 
